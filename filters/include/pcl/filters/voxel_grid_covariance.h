@@ -48,8 +48,8 @@ namespace pcl
 {
   /** \brief A searchable voxel strucure containing the mean and covariance of the data.
     * \note For more information please see
-    * <b>Magnusson, M. (2009). The Three-Dimensional Normal-Distributions Transform —
-    * an Efﬁcient Representation for Registration, Surface Analysis, and Loop Detection.
+    * <b>Magnusson, M. (2009). The Three-Dimensional Normal-Distributions Transform ?
+    * an Ef?cient Representation for Registration, Surface Analysis, and Loop Detection.
     * PhD thesis, Orebro University. Orebro Studies in Technology 36</b>
     * \author Brian Okorn (Space and Naval Warfare Systems Center Pacific)
     */
@@ -102,7 +102,8 @@ namespace pcl
           cov_ (Eigen::Matrix3d::Identity ()),
           icov_ (Eigen::Matrix3d::Zero ()),
           evecs_ (Eigen::Matrix3d::Identity ()),
-          evals_ (Eigen::Vector3d::Zero ())
+          evals_ (Eigen::Vector3d::Zero ()),
+          center_ (Eigen::Vector3d::Zero ())
         {
         }
 
@@ -162,7 +163,16 @@ namespace pcl
           return (nr_points);
         }
 
-        /** \brief Number of points contained by voxel */
+		/** \brief Get the voxel center.
+          * \return center
+          */
+        Eigen::Vector3d
+        getCenter () const
+        {
+          return (center_);
+        }
+
+		/** \brief Number of points contained by voxel */
         int nr_points;
 
         /** \brief 3D voxel centroid */
@@ -184,6 +194,14 @@ namespace pcl
 
         /** \brief Eigen values of voxel covariance matrix */
         Eigen::Vector3d evals_;
+
+        /** \brief Center of 3D voxel */
+        Eigen::Vector3d center_;
+
+        /** \brief Sigma points */
+		std::vector<Eigen::Vector3d> sigmapoints_;
+		/** \brief Eigen values of voxel covariance matrix without offset */
+		Eigen::Vector3d evals_wo_offset_;
 
       };
 
@@ -242,7 +260,7 @@ namespace pcl
       }
 
       /** \brief Set the minimum allowable ratio between eigenvalues to prevent singular covariance matrices.
-        * \param[in] min_points_per_voxel the minimum allowable ratio between eigenvalues
+        * \param[in] min_covar_eigvalue_mult the minimum allowable ratio between eigenvalues
         */
       inline void
       setCovEigValueInflationRatio (double min_covar_eigvalue_mult)
@@ -282,11 +300,20 @@ namespace pcl
        * \param[in] searchable flag if voxel structure is searchable, if true then kdtree is built
        */
       inline void
-      filter (bool searchable = false)
+      filter (bool searchable = false, bool overlapped = false)
       {
         searchable_ = searchable;
+        overlapped_ = overlapped;
         voxel_centroids_ = PointCloudPtr (new PointCloud);
-        applyFilter (*voxel_centroids_);
+		
+		if(overlapped_) {
+		  inverse_leaf_div_ = 2.0 * inverse_leaf_size_;
+		  inverse_leaf_div_[3] = 1.0;
+        } else {
+          inverse_leaf_div_ = inverse_leaf_size_;
+        }
+
+		applyFilter (*voxel_centroids_);
 
         if (searchable_ && voxel_centroids_->size() > 0)
         {
@@ -320,9 +347,9 @@ namespace pcl
       getLeaf (PointT &p)
       {
         // Generate index associated with p
-        int ijk0 = static_cast<int> (floor (p.x * inverse_leaf_size_[0]) - min_b_[0]);
-        int ijk1 = static_cast<int> (floor (p.y * inverse_leaf_size_[1]) - min_b_[1]);
-        int ijk2 = static_cast<int> (floor (p.z * inverse_leaf_size_[2]) - min_b_[2]);
+        int ijk0 = static_cast<int> (floor (p.x * inverse_leaf_div_[0]) - min_b_[0]);
+        int ijk1 = static_cast<int> (floor (p.y * inverse_leaf_div_[1]) - min_b_[1]);
+        int ijk2 = static_cast<int> (floor (p.z * inverse_leaf_div_[2]) - min_b_[2]);
 
         // Compute the centroid leaf index
         int idx = ijk0 * divb_mul_[0] + ijk1 * divb_mul_[1] + ijk2 * divb_mul_[2];
@@ -347,9 +374,9 @@ namespace pcl
       getLeaf (Eigen::Vector3f &p)
       {
         // Generate index associated with p
-        int ijk0 = static_cast<int> (floor (p[0] * inverse_leaf_size_[0]) - min_b_[0]);
-        int ijk1 = static_cast<int> (floor (p[1] * inverse_leaf_size_[1]) - min_b_[1]);
-        int ijk2 = static_cast<int> (floor (p[2] * inverse_leaf_size_[2]) - min_b_[2]);
+        int ijk0 = static_cast<int> (floor (p[0] * inverse_leaf_div_[0]) - min_b_[0]);
+        int ijk1 = static_cast<int> (floor (p[1] * inverse_leaf_div_[1]) - min_b_[1]);
+        int ijk2 = static_cast<int> (floor (p[2] * inverse_leaf_div_[2]) - min_b_[2]);
 
         // Compute the centroid leaf index
         int idx = ijk0 * divb_mul_[0] + ijk1 * divb_mul_[1] + ijk2 * divb_mul_[2];
@@ -365,6 +392,37 @@ namespace pcl
         else
           return NULL;
 
+      }
+
+      inline std::vector<Leaf>
+      getOverlappedLeaves (const Eigen::Vector3f &p)
+      {
+        std::vector<Leaf> OverlappedLeaves;
+
+        // Generate index associated with p
+        int ijk0 = static_cast<int> (floor (p[0] * inverse_leaf_div_[0]) - min_b_[0]);
+        int ijk1 = static_cast<int> (floor (p[1] * inverse_leaf_div_[1]) - min_b_[1]);
+        int ijk2 = static_cast<int> (floor (p[2] * inverse_leaf_div_[2]) - min_b_[2]);
+
+        int rn = overlapped_ ? 2 : 1;
+
+        for(int i=0;i<rn;i++){
+          for(int j=0;j<rn;j++){
+            for(int k=0;k<rn;k++){
+              // Compute the centroid leaf index
+              int idx = (ijk0-i) * divb_mul_[0] + (ijk1-j) * divb_mul_[1] + (ijk2-k) * divb_mul_[2];
+
+              // Find leaf associated with index
+			  typename std::map<size_t, Leaf>::iterator leaf_iter = leaves_.find(idx);
+              if (leaf_iter != leaves_.end ())
+              {
+                // If such a leaf exists return the pointer to the leaf structure
+                OverlappedLeaves.push_back (leaf_iter->second);
+              }
+            }
+          }
+        }
+        return OverlappedLeaves;
       }
 
       /** \brief Get the voxels surrounding point p, not including the voxel contating point p.
@@ -395,9 +453,17 @@ namespace pcl
         return voxel_centroids_;
       }
 
+      /** \brief Get if the voxels are overlapped.
+       */
+      inline bool
+      IsOverlapped ()
+      {
+        return overlapped_;
+      }
+	  
 
       /** \brief Get a cloud to visualize each voxels normal distribution.
-       * \param[out] a cloud created by sampling the normal distributions of each voxel
+       * \param[out] cell_cloud a cloud created by sampling the normal distributions of each voxel
        */
       void
       getDisplayCloud (pcl::PointCloud<PointXYZ>& cell_cloud);
@@ -438,7 +504,8 @@ namespace pcl
 
       /** \brief Search for the k-nearest occupied voxels for the given query point.
        * \note Only voxels containing a sufficient number of points are used.
-       * \param[in] point the given query point
+       * \param[in] cloud the given query point
+       * \param[in] index the index
        * \param[in] k the number of neighbors to search for
        * \param[out] k_leaves the resultant leaves of the neighboring points
        * \param[out] k_sqr_distances the resultant squared distances to the neighboring points
@@ -460,6 +527,7 @@ namespace pcl
        * \param[in] radius the radius of the sphere bounding all of p_q's neighbors
        * \param[out] k_leaves the resultant leaves of the neighboring points
        * \param[out] k_sqr_distances the resultant squared distances to the neighboring points
+       * \param[in] max_nn
        * \return number of neighbors found
        */
       int
@@ -495,6 +563,7 @@ namespace pcl
        * \param[in] radius the radius of the sphere bounding all of p_q's neighbors
        * \param[out] k_leaves the resultant leaves of the neighboring points
        * \param[out] k_sqr_distances the resultant squared distances to the neighboring points
+       * \param[in] max_nn
        * \return number of neighbors found
        */
       inline int
@@ -534,6 +603,11 @@ namespace pcl
 
       /** \brief KdTree generated using \ref voxel_centroids_ (used for searching). */
       KdTreeFLANN<PointT> kdtree_;
+
+      /** \brief Flag to create overlapped ND voxels. */
+      bool overlapped_;
+      Eigen::Array4f inverse_leaf_div_;
+
   };
 }
 
